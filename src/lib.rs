@@ -110,7 +110,7 @@ impl<'a, T: Send> Drop for BasicMutexGuard<'a, T> {
 
         let queue = unsafe { &mut *self.mutex.threads.get() };
 
-        if let Some(mut next_waiter) = queue.pop_front() {
+        if let Some(next_waiter) = queue.pop_front() {
             let still_has_waiters = !queue.is_empty();
             self.mutex.has_waiters.store(still_has_waiters, Ordering::Release);
             self.mutex.threads_lock.store(false, Ordering::Release);
@@ -211,15 +211,14 @@ impl<T: Send> BasicMutex<T> {
     /// *guard += 1;
     /// ```
     pub fn lock<'a>(&'a self) -> BasicMutexGuard<'a, T> {
-        if !self.has_waiters.load(Ordering::Acquire) {
-            if self
+        if !self.has_waiters.load(Ordering::Acquire)
+            && self
                 .lock
                 .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
                 .is_ok()
             {
                 return BasicMutexGuard { mutex: self };
             }
-        }
 
         self.has_waiters.store(true, Ordering::SeqCst);
 
