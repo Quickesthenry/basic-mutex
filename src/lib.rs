@@ -147,7 +147,7 @@ impl<'a, T: Send> Deref for BasicMutexGuard<'a, T> {
 
     fn deref(&self) -> &Self::Target {
         unsafe {
-            return &*self.mutex.value.get();
+            &*self.mutex.value.get()
         }
     }
 }
@@ -159,7 +159,7 @@ impl<'a, T: Send> Deref for BasicMutexGuard<'a, T> {
 impl<'a, T: Send> DerefMut for BasicMutexGuard<'a, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         unsafe {
-            return &mut *self.mutex.value.get();
+            &mut *self.mutex.value.get()
         }
     }
 }
@@ -301,7 +301,7 @@ impl<T: Send> BasicMutex<T> {
 
             // When we wake up, we loop back to the top to try and claim the main lock again.
         }
-        BasicMutexGuard { mutex: &self }
+        BasicMutexGuard { mutex: self }
     }
 }
 

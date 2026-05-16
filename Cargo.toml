@@ -1,9 +1,21 @@
 [package]
 name = "basic-mutex"
-version = "0.1.0"
+version = "0.1.1-alpha.1-pr2"
 edition = "2024"
 license = "Apache-2.0"
 description = "A lightweight, FIFO-ordered mutex with fair scheduling and hybrid spin–park synchronization."
 repository = "https://github.com/Quickesthenry/basic-mutex"
 
 [dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+parking_lot = "0.12.5"
+
+[[bench]]
+name = "blocking"
+harness = false
+
+[[bench]]
+name = "non_blocking"
+harness = false
