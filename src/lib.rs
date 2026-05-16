@@ -9,15 +9,19 @@
 use std::{
     cell::UnsafeCell,
     collections::VecDeque,
+    hint::spin_loop,
     ops::{Deref, DerefMut},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU8, Ordering},
     thread::Thread,
 };
 
 struct Waiter {
     thread: Thread,
-    ready: AtomicBool,
 }
+
+const LOCKED: u8 = 0b0000_0001;
+const HAS_WAITERS: u8 = 0b0000_0010;
+const QUEUE_LOCKED: u8 = 0b0000_0100;
 
 /// A mutual exclusion primitive useful for protecting shared data.
 ///
@@ -44,6 +48,7 @@ struct Waiter {
 /// assert_eq!(*mutex.lock(), 1);
 /// ```
 pub struct BasicMutex<T: Send> {
+    state: AtomicU8,
     lock: AtomicBool,
     has_waiters: AtomicBool,
     threads_lock: AtomicBool,
@@ -96,30 +101,66 @@ unsafe impl<T: Send> Sync for BasicMutex<T> {}
 
 impl<'a, T: Send> Drop for BasicMutexGuard<'a, T> {
     fn drop(&mut self) {
+        // 1. Acquire the QUEUE_LOCKED spinlock to safely touch the VecDeque
+        let mut old = self.mutex.state.load(Ordering::Acquire);
         loop {
-            if self
-                .mutex
-                .threads_lock
-                .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
+            if old & QUEUE_LOCKED != 0 {
+                spin_loop();
+                old = self.mutex.state.load(Ordering::Acquire);
+                continue;
             }
-            std::hint::spin_loop();
+
+            let new = old | QUEUE_LOCKED;
+
+            match self.mutex.state.compare_exchange_weak(
+                old,
+                new,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => {
+                    old = actual;
+                    spin_loop();
+                }
+            }
         }
 
+        // 2. Access the queue under mutual exclusion
         let queue = unsafe { &mut *self.mutex.threads.get() };
+        let popped_waiter = queue.pop_front();
+        let still_has_waiters = !queue.is_empty();
 
-        if let Some(next_waiter) = queue.pop_front() {
-            let still_has_waiters = !queue.is_empty();
-            self.mutex.has_waiters.store(still_has_waiters, Ordering::Release);
-            self.mutex.threads_lock.store(false, Ordering::Release);
-            next_waiter.ready.store(true, Ordering::Release);
+        // 3. Atomically release both QUEUE_LOCKED and LOCKED bits
+        let mut current = self.mutex.state.load(Ordering::Acquire);
+        loop {
+            // We clear QUEUE_LOCKED and clear LOCKED because the next thread
+            // must competitively re-acquire the lock bit when it wakes up.
+            let mut new = current & !QUEUE_LOCKED & !LOCKED;
+
+            if still_has_waiters {
+                new |= HAS_WAITERS;
+            } else {
+                new &= !HAS_WAITERS;
+            }
+
+            match self.mutex.state.compare_exchange_weak(
+                current,
+                new,
+                Ordering::Release,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => {
+                    current = actual;
+                    spin_loop();
+                }
+            }
+        }
+
+        // 4. Wake up the thread if one was waiting
+        if let Some(next_waiter) = popped_waiter {
             next_waiter.thread.unpark();
-        } else {
-            self.mutex.has_waiters.store(false, Ordering::Release);
-            self.mutex.lock.store(false, Ordering::Release);
-            self.mutex.threads_lock.store(false, Ordering::Release);
         }
     }
 }
@@ -149,6 +190,7 @@ impl<T: Send> BasicMutex<T> {
     /// ```
     pub fn new(value: T) -> Self {
         Self {
+            state: AtomicU8::new(0),
             lock: AtomicBool::new(false),
             has_waiters: AtomicBool::new(false),
             threads_lock: AtomicBool::new(false),
@@ -177,18 +219,30 @@ impl<T: Send> BasicMutex<T> {
     /// }
     /// ```
     pub fn try_lock(&self) -> Option<BasicMutexGuard<'_, T>> {
-        if self.has_waiters.load(Ordering::Acquire) {
+        // self.has_waiters.load(Ordering::Acquire)
+        if (self.state.load(Ordering::Acquire) & HAS_WAITERS) != 0 {
             return None;
         }
 
-        if self
-            .lock
-            .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_ok()
-        {
-            Some(BasicMutexGuard { mutex: self })
-        } else {
-            None
+        let mut current = self.state.load(Ordering::Acquire);
+
+        loop {
+            // if already locked, fail fast
+            if current & LOCKED != 0 {
+                return None;
+            }
+
+            let new = current | LOCKED;
+
+            match self.state.compare_exchange_weak(
+                current,
+                new,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(BasicMutexGuard { mutex: self }),
+                Err(actual) => current = actual,
+            }
         }
     }
 
@@ -209,49 +263,103 @@ impl<T: Send> BasicMutex<T> {
     /// let mutex = BasicMutex::new(42);
     /// let mut guard = mutex.lock();
     /// *guard += 1;
-    /// ```
+    ///
     pub fn lock<'a>(&'a self) -> BasicMutexGuard<'a, T> {
-        if !self.has_waiters.load(Ordering::Acquire)
-            && self
-                .lock
-                .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                return BasicMutexGuard { mutex: self };
-            }
+        let mut state = self.state.load(Ordering::Acquire);
 
-        self.has_waiters.store(true, Ordering::SeqCst);
-
+        // -------------------------------------------------------------
+        // PHASE 1: Competitive Fast Path
+        // -------------------------------------------------------------
         loop {
-            if self
-                .threads_lock
-                .compare_exchange_weak(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
+            // If the lock bit is clear, attempt to claim it immediately
+            if state & LOCKED == 0 {
+                let new = state | LOCKED;
+                match self.state.compare_exchange_weak(
+                    state,
+                    new,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return BasicMutexGuard { mutex: self },
+                    Err(actual) => {
+                        state = actual;
+                        continue;
+                    }
+                }
             }
-            std::hint::spin_loop();
+            break;
         }
 
+        // -------------------------------------------------------------
+        // PHASE 2: Acquire the Queue Spinlock
+        // -------------------------------------------------------------
+        let mut state = self.state.load(Ordering::Acquire);
+        loop {
+            // We must claim exclusive rights to modify the VecDeque
+            if state & QUEUE_LOCKED == 0 {
+                let new = state | QUEUE_LOCKED | HAS_WAITERS;
+                match self.state.compare_exchange_weak(
+                    state,
+                    new,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => {
+                        state = actual;
+                        continue;
+                    }
+                }
+            }
+            std::hint::spin_loop();
+            state = self.state.load(Ordering::Acquire);
+        }
+
+        // -------------------------------------------------------------
+        // PHASE 3: Enqueue the Waiter Node
+        // -------------------------------------------------------------
+        // We instantiate our explicit Waiter abstraction here.
+        // Pushing it onto the VecDeque is perfectly safe under QUEUE_LOCKED.
         let waiter = Waiter {
             thread: std::thread::current(),
-            ready: AtomicBool::new(false),
         };
 
-        let queue = unsafe { &mut *self.threads.get() };
-        queue.push_back(waiter);
-        
-        let waiter_ptr = unsafe {
-            let ptr = queue.back().unwrap() as *const Waiter;
-            &(*ptr).ready as *const AtomicBool
-        };
+        unsafe {
+            let queue = &mut *self.threads.get();
+            queue.push_back(waiter);
+        }
 
-        self.threads_lock.store(false, Ordering::Release);
-
+        // Release the VecDeque spinlock
+        let mut state = self.state.load(Ordering::Acquire);
         loop {
-            if unsafe { (*waiter_ptr).load(Ordering::Acquire) } {
-                break;
+            let new = state & !QUEUE_LOCKED;
+            match self
+                .state
+                .compare_exchange_weak(state, new, Ordering::Release, Ordering::Acquire)
+            {
+                Ok(_) => break,
+                Err(actual) => state = actual,
             }
+        }
+
+        // -------------------------------------------------------------
+        // PHASE 4: Competitive Parking Loop
+        // -------------------------------------------------------------
+        loop {
+            // Since there is no status flag inside the waiter node,
+            // we wake up and try to actively contest the lock state.
+            state = self.state.load(Ordering::Acquire);
+            if state & LOCKED == 0 {
+                let new = state | LOCKED;
+                if self
+                    .state
+                    .compare_exchange_weak(state, new, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+
             std::thread::park();
         }
 

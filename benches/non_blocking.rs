@@ -1,8 +1,8 @@
-use criterion::{criterion_group, criterion_main, Criterion};
+use basic_mutex::BasicMutex;
+use criterion::{Criterion, criterion_group, criterion_main};
+use parking_lot::Mutex as PlMutex;
 use std::hint::black_box;
 use std::sync::{Arc, Mutex as StdMutex};
-use parking_lot::Mutex as PlMutex;
-use basic_mutex::BasicMutex;
 
 /// Benchmarks std::sync::Mutex try_lock overhead.
 fn bench_std_try_lock(c: &mut Criterion) {
@@ -13,7 +13,9 @@ fn bench_std_try_lock(c: &mut Criterion) {
             // We loop to measure the cost of the atomic operation + guard creation.
             for _ in 0..10_000 {
                 // Unwrap expected success; panic on failure to surface issues.
-                let mut guard = mutex.try_lock().expect("std::sync::Mutex try_lock failed in benchmark");
+                let mut guard = mutex
+                    .try_lock()
+                    .expect("std::sync::Mutex try_lock failed in benchmark");
                 *guard += 1;
                 black_box(*guard);
             }
@@ -29,7 +31,9 @@ fn bench_pl_try_lock(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..10_000 {
                 // Unwrap expected success; panic on failure to surface issues.
-                let mut guard = mutex.try_lock().expect("parking_lot::Mutex try_lock failed in benchmark");
+                let mut guard = mutex
+                    .try_lock()
+                    .expect("parking_lot::Mutex try_lock failed in benchmark");
                 *guard += 1;
                 black_box(*guard);
             }
@@ -46,7 +50,9 @@ fn bench_basic_try_lock(c: &mut Criterion) {
             for _ in 0..10_000 {
                 // Adjust 'Some' to 'Ok' if your API returns Result
                 // Unwrap expected success; panic on failure to surface issues.
-                let mut guard = mutex.try_lock().expect("basic_mutex try_lock failed in benchmark");
+                let mut guard = mutex
+                    .try_lock()
+                    .expect("basic_mutex try_lock failed in benchmark");
                 *guard += 1;
                 black_box(*guard);
             }
@@ -55,9 +61,9 @@ fn bench_basic_try_lock(c: &mut Criterion) {
 }
 
 criterion_group!(
-    benches, 
-    bench_std_try_lock, 
-    bench_pl_try_lock, 
+    benches,
+    bench_std_try_lock,
+    bench_pl_try_lock,
     bench_basic_try_lock
 );
 criterion_main!(benches);
