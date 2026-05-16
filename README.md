@@ -68,7 +68,8 @@ This balances low latency under light contention with CPU efficiency under heavy
 
 - Lower throughput than unfair mutexes in some workloads  
 - Additional overhead from maintaining a queue  
-- Not intended for lock-free or ultra-low-latency scenarios  
+- Not intended for lock-free or ultra-low-latency scenarios
+- The Lock including 3 other items aside from the main value  
 
 Use this crate when fairness and predictability are more important than raw throughput.
 
