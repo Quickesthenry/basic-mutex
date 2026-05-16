@@ -4,5 +4,6 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "A lightweight, FIFO-ordered mutex with fair scheduling and hybrid spin–park synchronization."
+repository = "https://github.com/Quickesthenry/basic-mutex"
 
 [dependencies]
