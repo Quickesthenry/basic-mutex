@@ -1,6 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use std::hint::black_box;
-use std::sync::{Arc, AtomicBool, Barrier};
+use std::sync::{Arc, atomic::AtomicBool, Barrier};
 use std::sync::atomic::Ordering;
 use basic_mutex::BasicMutex;
 use parking_lot::Mutex as PlMutex; // Add this import
