@@ -12,10 +12,10 @@ fn bench_std_try_lock(c: &mut Criterion) {
             // In an uncontended scenario, try_lock should almost always succeed.
             // We loop to measure the cost of the atomic operation + guard creation.
             for _ in 0..10_000 {
-                if let Ok(mut guard) = mutex.try_lock() {
-                    *guard += 1;
-                    black_box(*guard);
-                }
+                // Unwrap expected success; panic on failure to surface issues.
+                let mut guard = mutex.try_lock().expect("std::sync::Mutex try_lock failed in benchmark");
+                *guard += 1;
+                black_box(*guard);
             }
         });
     });
@@ -28,10 +28,10 @@ fn bench_pl_try_lock(c: &mut Criterion) {
     c.bench_function("parking_lot_try_lock_uncontended", |b| {
         b.iter(|| {
             for _ in 0..10_000 {
-                if let Some(mut guard) = mutex.try_lock() {
-                    *guard += 1;
-                    black_box(*guard);
-                }
+                // Unwrap expected success; panic on failure to surface issues.
+                let mut guard = mutex.try_lock().expect("parking_lot::Mutex try_lock failed in benchmark");
+                *guard += 1;
+                black_box(*guard);
             }
         });
     });
@@ -45,10 +45,10 @@ fn bench_basic_try_lock(c: &mut Criterion) {
         b.iter(|| {
             for _ in 0..10_000 {
                 // Adjust 'Some' to 'Ok' if your API returns Result
-                if let Some(mut guard) = mutex.try_lock() { 
-                    *guard += 1;
-                    black_box(*guard);
-                }
+                // Unwrap expected success; panic on failure to surface issues.
+                let mut guard = mutex.try_lock().expect("basic_mutex try_lock failed in benchmark");
+                *guard += 1;
+                black_box(*guard);
             }
         });
     });
