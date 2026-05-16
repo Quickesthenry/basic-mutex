@@ -72,6 +72,28 @@ This balances low latency under light contention with CPU efficiency under heavy
 
 Use this crate when fairness and predictability are more important than raw throughput.
 
+## Performance
+
+`basic-mutex` is designed for **fairness**, not raw maximum throughput. It enforces strict FIFO ordering to prevent thread starvation, which introduces measurable overhead compared to unfair mutexes that allow "lock barging."
+
+### Benchmark Results (Illustrative)
+*Environment: 4 threads, high contention, Windows/Linux (results vary by hardware).*
+
+| Implementation | Avg. Time | Fairness Model |
+| :--- | :--- | :--- |
+| `parking_lot::Mutex` | ~163 µs | Unfair (Barging allowed) |
+| `std::sync::Mutex` | ~162 µs | Unfair (Barging allowed) |
+| **`basic-mutex`** | **~195 µs** | **Strict FIFO (Starvation-free)** |
+
+> **Note:** The ~20% difference observed here represents the cost of maintaining a fair queue and preventing overtaking. In low-contention scenarios, this gap narrows significantly. In high-contention scenarios, `basic-mutex` provides predictable latency at the expense of total throughput.
+
+### Why choose `basic-mutex`?
+*   **Prevent Starvation:** In unfair mutexes, a "fast" thread can repeatedly steal the lock from waiting threads. `basic-mutex` guarantees that every thread gets its turn in order.
+*   **Predictable Latency:** Because threads are served in order, worst-case wait times are bounded and predictable, which is critical for real-time or responsive systems.
+*   **Hybrid Efficiency:** It uses exponential backoff spinning for short waits and OS-level parking for long waits, balancing CPU usage with responsiveness.
+
+Use `basic-mutex` when **correctness and fairness** are more important than squeezing out the last few nanoseconds of throughput.
+
 ## Safety
 
 - Uses `UnsafeCell` internally for interior mutability  

@@ -7,3 +7,15 @@ description = "A lightweight, FIFO-ordered mutex with fair scheduling and hybrid
 repository = "https://github.com/Quickesthenry/basic-mutex"
 
 [dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+parking_lot = "0.12.5"
+
+[[bench]]
+name = "blocking"
+harness = false
+
+[[bench]]
+name = "non_blocking"
+harness = false
