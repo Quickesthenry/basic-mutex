@@ -1,4 +1,4 @@
-# basic_mutex
+# basic_mutex [![CI](https://github.com/Quickesthenry/basic-mutex/actions/workflows/rust.yml/badge.svg)](https://github.com/Quickesthenry/basic-mutex/actions/workflows/rust.yml) [![Crates.io](https://img.shields.io/crates/v/basic-mutex.svg)](https://crates.io/crates/basic-mutex)
 
 A lightweight, fair, FIFO-ordered mutex for Rust.
 
@@ -93,7 +93,7 @@ Run tests with:
 
 ## License
 
-Apache 2.0
+[Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0)
 
 ## Contributing
 
