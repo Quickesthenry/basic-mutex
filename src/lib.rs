@@ -45,6 +45,7 @@ use std::{
     cell::UnsafeCell,
     collections::VecDeque,
     hint::spin_loop,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicU8, Ordering},
     thread::Thread,
@@ -90,6 +91,7 @@ pub struct BasicMutex<T: Send> {
 /// which would violate the lock's ownership semantics.
 pub struct BasicMutexGuard<'a, T: Send> {
     mutex: &'a BasicMutex<T>,
+    phantom: PhantomData<*mut T>,
 }
 
 // SAFETY: BasicMutex is safe to share between threads if T is Send.
@@ -180,7 +182,7 @@ impl<T: Send> BasicMutex<T> {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Some(BasicMutexGuard { mutex: self }),
+                Ok(_) => return Some(BasicMutexGuard { mutex: self, phantom: PhantomData }),
                 Err(actual) => current = actual,
             }
         }
@@ -206,7 +208,7 @@ impl<T: Send> BasicMutex<T> {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return BasicMutexGuard { mutex: self },
+                Ok(_) => return BasicMutexGuard { mutex: self, phantom: PhantomData },
                 Err(actual) => state = actual, // Retry with new state
             }
         }
@@ -214,7 +216,7 @@ impl<T: Send> BasicMutex<T> {
         let current_thread = std::thread::current();
 
         // Acquire queue spinlock to push waiter
-        loop {
+        let acquired_state = loop {
             let s = self.state.load(Ordering::Acquire);
             if s & QUEUE_LOCKED == 0 {
                 match self.state.compare_exchange_weak(
@@ -223,12 +225,19 @@ impl<T: Send> BasicMutex<T> {
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ) {
-                    Ok(_) => break,
+                    Ok(_) => break s,
                     Err(_) => spin_loop(),
                 }
             } else {
                 spin_loop();
             }
+        };
+
+        // Recheck: If mutex became free while we were acquiring QUEUE_LOCKED, claim it directly
+        if acquired_state & LOCKED == 0 {
+            // Mutex is free, claim it without enqueueing
+            self.state.store(LOCKED, Ordering::Release);
+            return BasicMutexGuard { mutex: self, phantom: PhantomData };
         }
 
         // Push to queue
@@ -250,7 +259,7 @@ impl<T: Send> BasicMutex<T> {
             // If WOKEN is set, try to claim the lock
             if state & WOKEN != 0 {
                 if self.try_claim_lock(&current_thread) {
-                    return BasicMutexGuard { mutex: self };
+                    return BasicMutexGuard { mutex: self, phantom: PhantomData };
                 }
             }
 
@@ -398,9 +407,10 @@ mod tests {
             }));
         }
 
-        // Wait for all 4 threads to signal they are ready/waiting
+        // Wait for all 4 threads to signal they are ready/waiting and capture enqueue order
+        let mut enqueue_order = Vec::new();
         for _ in 0..4 {
-            rx.recv().unwrap();
+            enqueue_order.push(rx.recv().unwrap());
         }
 
         // Small yield to ensure they are fully parked/queued
@@ -414,9 +424,7 @@ mod tests {
         }
 
         let final_order = order.lock().unwrap().clone();
-        assert_eq!(final_order.len(), 4);
-        // Note: Strict ordering [0,1,2,3] is not guaranteed by OS scheduling,
-        // but the queue logic ensures they are processed in enqueue order.
+        assert_eq!(final_order, enqueue_order);
     }
 
     /// Test 4: Try Lock Failure

@@ -10,7 +10,7 @@ A high-performance, **FIFO-ordered** mutex for Rust.
 
 ## 🚀 Key Features
 
-*   **Strict FIFO Ordering:** Prevents thread starvation by enforcing first-in-first-out acquisition.
+*   **Strict FIFO Ordering:** Prevents thread starvation with FIFO-style behavior observed under contention.
 *   **High Performance:** Competitive with `std::sync::Mutex` and `parking_lot` in uncontended scenarios (~38ns/lock).
 *   **Hybrid Waiting Strategy:** Uses efficient CPU spinning for short waits and OS-level parking for long waits.
 *   **Zero Dependencies:** Built entirely on `std::sync::atomic`. No external crates required.
@@ -81,6 +81,13 @@ Most standard mutexes (like `std::sync::Mutex` or `parking_lot::Mutex`) are **un
 
 `basic-mutex` is optimized for low overhead. In uncontended benchmarks (single-threaded lock/unlock cycles), it performs within ~20% of highly optimized system mutexes.
 
+**Benchmark Provenance:**
+- Environment: Windows x86_64 (OS version not specified), CPU model and frequency not specified, core count not specified
+- Rust/toolchain version: Not specified
+- Command: `cargo test test_comparative_performance -- --nocapture`
+- Parameters: 100,000 iterations per operation, uncontended single-threaded test
+- Commit/Date: Not specified
+
 | Implementation     | Lock (ns) | Try Lock (ns) | Fairness |
 | ------------------ | --------- | ------------- | -------- |
 | `std::sync::Mutex` | ~30.10    | ~34.35        | Unfair   |
@@ -95,7 +102,7 @@ Most standard mutexes (like `std::sync::Mutex` or `parking_lot::Mutex`) are **un
 
 This crate includes a rigorous test suite covering:
 *   **Mutual Exclusion:** Ensuring data races are impossible.
-*   **FIFO Ordering:** Verifying that threads acquire the lock in arrival order.
+*   **FIFO Ordering:** Verifying that FIFO-style behavior is observed under contention.
 *   **Lost Wakeup Torture:** Stress-testing the hybrid spin/park mechanism under extreme contention.
 *   **Reentrancy Checks:** Ensuring deadlocks are handled as expected.
 

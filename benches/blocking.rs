@@ -3,7 +3,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use parking_lot::Mutex as PlMutex;
 use std::hint::black_box;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Barrier, atomic::AtomicBool}; // Add this import
+use std::sync::{Arc, Barrier, atomic::AtomicBool};
 
 fn bench_parking_lot_mutex(c: &mut Criterion) {
     let mutex = Arc::new(PlMutex::new(0u64));
