@@ -1,4 +1,4 @@
-# basic_mutex [![CI](https://github.com/Quickesthenry/basic-mutex/actions/workflows/rust.yml/badge.svg)](https://github.com/Quickesthenry/basic-mutex/actions/workflows/rust.yml) [![Crates.io](https://img.shields.io/crates/v/basic-mutex.svg)](https://crates.io/crates/basic-mutex)
+# basic_mutex [![CI](https://github.com/Quickesthenry/basic-mutex/actions/workflows/rust.yml/badge.svg)](https://github.com/Quickesthenry/basic-mutex/actions/workflows/rust.yml) [![Crates.io](https://img.shields.io/crates/v/basic-mutex.svg)](https://crates.io/crates/basic-mutex) [![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/Quickesthenry/basic-mutex?utm_source=oss&utm_medium=github&utm_campaign=Quickesthenry%2Fbasic-mutex&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
 
 A lightweight, fair, FIFO-ordered mutex for Rust.
 
@@ -68,7 +68,8 @@ This balances low latency under light contention with CPU efficiency under heavy
 
 - Lower throughput than unfair mutexes in some workloads  
 - Additional overhead from maintaining a queue  
-- Not intended for lock-free or ultra-low-latency scenarios  
+- Not intended for lock-free or ultra-low-latency scenarios
+- The Lock including 3 other items aside from the main value  
 
 Use this crate when fairness and predictability are more important than raw throughput.
 
