@@ -49,6 +49,7 @@ use std::{
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicU8, Ordering},
     thread::{Thread, ThreadId},
+    time::Duration,
 };
 
 // Internal bitflags for the atomic state
@@ -56,6 +57,10 @@ const LOCKED: u8 = 0b0000_0001;
 const HAS_WAITERS: u8 = 0b0000_0010;
 const QUEUE_LOCKED: u8 = 0b0000_0100;
 const WOKEN: u8 = 0b0000_1000;
+
+// Backoff thresholds for the queue spinlock
+const SPIN_LIMIT: u32 = 100;
+const YIELD_LIMIT: u32 = 1000;
 
 /// Internal representation of a thread waiting for the lock.
 struct Waiter {
@@ -101,23 +106,8 @@ unsafe impl<T: Send> Sync for BasicMutex<T> {}
 
 impl<'a, T: Send> Drop for BasicMutexGuard<'a, T> {
     fn drop(&mut self) {
-        // 1. Acquire Queue Spinlock
-        loop {
-            let s = self.mutex.state.load(Ordering::Acquire);
-            if s & QUEUE_LOCKED == 0 {
-                match self.mutex.state.compare_exchange_weak(
-                    s,
-                    s | QUEUE_LOCKED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => break,
-                    Err(_) => spin_loop(),
-                }
-            } else {
-                spin_loop();
-            }
-        }
+        // 1. Acquire Queue Spinlock (with exponential backoff)
+        self.mutex.acquire_queue_spinlock(0);
 
         // 2. Peek next waiter
         let next_thread = unsafe {
@@ -217,23 +207,8 @@ impl<T: Send> BasicMutex<T> {
         let current_thread = std::thread::current();
         let current_thread_id = current_thread.id();
 
-        // Acquire queue spinlock to push waiter
-        let acquired_state = loop {
-            let s = self.state.load(Ordering::Acquire);
-            if s & QUEUE_LOCKED == 0 {
-                match self.state.compare_exchange_weak(
-                    s,
-                    s | QUEUE_LOCKED | HAS_WAITERS,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => break s,
-                    Err(_) => spin_loop(),
-                }
-            } else {
-                spin_loop();
-            }
-        };
+        // Acquire queue spinlock to push waiter (also sets HAS_WAITERS atomically)
+        let acquired_state = self.acquire_queue_spinlock(HAS_WAITERS);
 
         // Recheck: If mutex is truly uncontended (no lock, no waiters, no pending wakeup),
         // claim it directly without enqueueing. We must check all three bits to prevent
@@ -282,29 +257,60 @@ impl<T: Send> BasicMutex<T> {
         }
     }
 
-    /// Helper: Attempts to claim lock if we are at the front of the queue.
-    fn try_claim_lock(&self, current_thread_id: ThreadId) -> bool {
-        // Acquire queue spinlock
+    /// Acquires the `QUEUE_LOCKED` spinlock with exponential backoff.
+    ///
+    /// `extra_bits` are set atomically alongside `QUEUE_LOCKED` in the successful
+    /// compare-exchange (e.g. `HAS_WAITERS` when enqueueing during `lock()`).
+    ///
+    /// Returns the state value observed *before* the spinlock was acquired.
+    ///
+    /// # Backoff strategy
+    /// 1. Spin for `SPIN_LIMIT` iterations (`spin_loop` hint — stays on-core).
+    /// 2. Call `yield_now()` for the next `YIELD_LIMIT - SPIN_LIMIT` iterations
+    ///    (lets other runnable threads proceed without sleeping).
+    /// 3. Sleep for 1 µs thereafter, resetting the counter to `YIELD_LIMIT` so
+    ///    subsequent failures keep yielding rather than sleeping again immediately.
+    ///
+    /// Unlike parking, neither `yield_now` nor `sleep` require a matching unpark,
+    /// so there is no deadlock risk.
+    fn acquire_queue_spinlock(&self, extra_bits: u8) -> u8 {
+        let mut spin_count = 0u32;
         loop {
             let s = self.state.load(Ordering::Acquire);
             if s & QUEUE_LOCKED == 0 {
                 match self.state.compare_exchange_weak(
                     s,
-                    s | QUEUE_LOCKED,
+                    s | QUEUE_LOCKED | extra_bits,
                     Ordering::AcqRel,
                     Ordering::Acquire,
                 ) {
-                    Ok(_) => break,
-                    Err(_) => spin_loop(),
+                    Ok(_) => return s,
+                    Err(_) => spin_count += 1,
                 }
             } else {
+                spin_count += 1;
+            }
+
+            if spin_count < SPIN_LIMIT {
                 spin_loop();
+            } else if spin_count < YIELD_LIMIT {
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(Duration::from_micros(1));
+                // Reset to YIELD_LIMIT so subsequent failures yield rather than sleep.
+                spin_count = YIELD_LIMIT;
             }
         }
+    }
+
+    /// Helper: Attempts to claim lock if we are at the front of the queue.
+    fn try_claim_lock(&self, current_thread_id: ThreadId) -> bool {
+        // Acquire queue spinlock (with exponential backoff)
+        self.acquire_queue_spinlock(0);
 
         // Check if front
         let is_front = unsafe {
-            let queue = &*self.threads.get();
+
             queue
                 .front()
                 .map_or(false, |w| w.thread_id == current_thread_id)
