@@ -250,14 +250,13 @@ impl<T: Send> BasicMutex<T> {
             let state = self.state.load(Ordering::Acquire);
 
             // If WOKEN is set, try to claim the lock
-            if state & WOKEN != 0 {
-                if self.try_claim_lock(current_thread_id) {
+            if state & WOKEN != 0
+                && self.try_claim_lock(current_thread_id) {
                     return BasicMutexGuard {
                         mutex: self,
                         phantom: PhantomData,
                     };
                 }
-            }
 
             // Hybrid Backoff: Spin briefly, then park
             if spin_count < 100 {
@@ -328,7 +327,7 @@ impl<T: Send> BasicMutex<T> {
         let is_front = unsafe {
             (&*self.threads.get())
                 .front()
-                .map_or(false, |w| w.thread_id == current_thread_id)
+                .is_some_and(|w| w.thread_id == current_thread_id)
         };
 
         if !is_front {
