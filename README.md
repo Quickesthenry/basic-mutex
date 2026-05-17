@@ -6,11 +6,11 @@
 
 A high-performance, **FIFO-ordered** mutex for Rust.
 
-`basic-mutex` provides a starvation-free synchronization primitive that guarantees threads acquire locks in the order they requested them. Unlike standard mutexes which may allow "lock barging," `BasicMutex` ensures predictable scheduling without sacrificing significant performance.
+`basic-mutex` provides a **FIFO-ordered** synchronization primitive. Threads waiting on `lock()` acquire it in strict enqueue order — eliminating starvation *for queued waiters* under contention. Unlike standard mutexes which may allow "lock barging," `BasicMutex` ensures predictable scheduling without sacrificing significant performance.
 
 ## 🚀 Key Features
 
-*   **Strict FIFO Ordering:** Prevents thread starvation with FIFO-style behavior observed under contention.
+*   **FIFO Ordering Under Contention:** Threads waiting in `lock()` are served in strict FIFO order, eliminating starvation for queued waiters.
 *   **High Performance:** Competitive with `std::sync::Mutex` and `parking_lot` in uncontended scenarios (~38ns/lock).
 *   **Hybrid Waiting Strategy:** Uses efficient CPU spinning for short waits and OS-level parking for long waits.
 *   **Zero Dependencies:** Built entirely on `std::sync::atomic`. No external crates required.
@@ -70,7 +70,7 @@ Most standard mutexes (like `std::sync::Mutex` or `parking_lot::Mutex`) are **un
 
 ### When to use `basic-mutex`:
 *   You need to guarantee that requests are processed in order (e.g., transaction processing).
-*   You want to prevent thread starvation in high-contention scenarios.
+*   You want to prevent starvation *for queued waiters* under high contention.
 *   You prefer predictable latency over raw maximum throughput.
 
 ### When to use `std::sync::Mutex` or `parking_lot`:
@@ -101,11 +101,9 @@ On `drop` of `BasicMutexGuard`, the holder acquires `QUEUE_LOCKED`, peeks at the
 `basic-mutex` is optimized for low overhead. In uncontended benchmarks (single-threaded lock/unlock cycles), it performs within ~20% of highly optimized system mutexes.
 
 **Benchmark Provenance:**
-- Environment: Windows x86_64 (OS version not specified), CPU model and frequency not specified, core count not specified
-- Rust/toolchain version: Not specified
+- Environment: Windows x86_64
 - Command: `cargo test test_comparative_performance -- --nocapture`
-- Parameters: 100,000 iterations per operation, uncontended single-threaded test
-- Commit/Date: Not specified
+- Parameters: 100,000 iterations per operation, single-threaded uncontended test
 
 | Implementation     | Lock (ns) | Try Lock (ns) | Fairness |
 | ------------------ | --------- | ------------- | -------- |
