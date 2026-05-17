@@ -82,7 +82,7 @@ impl<'a, T: Send> Drop for BasicMutexGuard<'a, T> {
         let has_waiters = next_thread.is_some();
 
         // 3. Update state while HOLDING queue lock
-        let mut new_state = 0u8;
+        let mut new_state = QUEUE_LOCKED;
         if has_waiters {
             new_state |= HAS_WAITERS | WOKEN;
         }
@@ -272,23 +272,12 @@ impl<T: Send> BasicMutex<T> {
     fn try_claim_lock(&self, current_thread_id: ThreadId) -> bool {
         self.acquire_queue_spinlock(0);
 
-        // All queue operations in one unsafe block to avoid stacked borrows issues
-        let (is_front, has_waiters) = unsafe {
-            let queue = &mut *self.threads.get();
-            
-            // Check if we're at front
-            let is_front = queue
+        // Check if we're at front without popping yet
+        let is_front = unsafe {
+            let queue = &*self.threads.get();
+            queue
                 .front()
-                .is_some_and(|w| w.thread_id == current_thread_id);
-            
-            if !is_front {
-                (false, false)
-            } else {
-                // Pop and claim - we were at front
-                queue.pop_front();
-                let has_waiters = !queue.is_empty();
-                (true, has_waiters)
-            }
+                .is_some_and(|w| w.thread_id == current_thread_id)
         };
 
         if !is_front {
@@ -302,6 +291,13 @@ impl<T: Send> BasicMutex<T> {
             self.state.fetch_and(!QUEUE_LOCKED, Ordering::Release);
             return false;
         }
+
+        // Only now pop the waiter since we confirmed we were woken
+        let has_waiters = unsafe {
+            let queue = &mut *self.threads.get();
+            queue.pop_front();
+            !queue.is_empty()
+        };
 
         // Clear WOKEN when claiming - we're the new lock holder
         let mut new_state = LOCKED;
@@ -369,14 +365,18 @@ mod tests {
         let main_guard = mutex.lock();
 
         let mut start_txs = Vec::new();
+        let mut ready_rxs = Vec::new();
         for i in 0..4 {
             let (start_tx, start_rx) = std::sync::mpsc::channel::<()>();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel::<()>();
             start_txs.push(start_tx);
+            ready_rxs.push(ready_rx);
 
             let m = Arc::clone(&mutex);
             let ao = Arc::clone(&acquire_order);
             handles.push(thread::spawn(move || {
                 start_rx.recv().unwrap();
+                ready_tx.send(()).unwrap();
                 let _guard = m.lock();
                 ao.lock().unwrap().push(i);
             }));
@@ -384,7 +384,10 @@ mod tests {
 
         for tx in start_txs {
             tx.send(()).unwrap();
-            thread::sleep(std::time::Duration::from_millis(5));
+        }
+
+        for ready_rx in ready_rxs {
+            ready_rx.recv().unwrap();
         }
 
         drop(main_guard);
