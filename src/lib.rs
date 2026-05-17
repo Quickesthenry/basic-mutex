@@ -173,7 +173,12 @@ impl<T: Send> BasicMutex<T> {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Some(BasicMutexGuard { mutex: self, phantom: PhantomData }),
+                Ok(_) => {
+                    return Some(BasicMutexGuard {
+                        mutex: self,
+                        phantom: PhantomData,
+                    });
+                }
                 Err(actual) => current = actual,
             }
         }
@@ -199,7 +204,12 @@ impl<T: Send> BasicMutex<T> {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return BasicMutexGuard { mutex: self, phantom: PhantomData },
+                Ok(_) => {
+                    return BasicMutexGuard {
+                        mutex: self,
+                        phantom: PhantomData,
+                    };
+                }
                 Err(actual) => state = actual, // Retry with new state
             }
         }
@@ -216,7 +226,10 @@ impl<T: Send> BasicMutex<T> {
         if acquired_state & (LOCKED | HAS_WAITERS | WOKEN) == 0 {
             // Mutex is free, claim it without enqueueing
             self.state.store(LOCKED, Ordering::Release);
-            return BasicMutexGuard { mutex: self, phantom: PhantomData };
+            return BasicMutexGuard {
+                mutex: self,
+                phantom: PhantomData,
+            };
         }
 
         // Push to queue
@@ -239,7 +252,10 @@ impl<T: Send> BasicMutex<T> {
             // If WOKEN is set, try to claim the lock
             if state & WOKEN != 0 {
                 if self.try_claim_lock(current_thread_id) {
-                    return BasicMutexGuard { mutex: self, phantom: PhantomData };
+                    return BasicMutexGuard {
+                        mutex: self,
+                        phantom: PhantomData,
+                    };
                 }
             }
 
@@ -310,7 +326,6 @@ impl<T: Send> BasicMutex<T> {
 
         // Check if front
         let is_front = unsafe {
-
             queue
                 .front()
                 .map_or(false, |w| w.thread_id == current_thread_id)
@@ -682,7 +697,6 @@ mod tests {
     /// Compares BasicMutex against std::sync::Mutex and parking_lot::Mutex.
     #[test]
     fn test_comparative_performance() {
-
         use parking_lot::Mutex as PlMutex;
         use std::sync::Mutex as StdMutex;
 
