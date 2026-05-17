@@ -77,6 +77,25 @@ Most standard mutexes (like `std::sync::Mutex` or `parking_lot::Mutex`) are **un
 *   You need the absolute highest possible throughput under low contention.
 *   Lock ordering does not matter for your application logic.
 
+## ⚙️ How It Works
+
+`BasicMutex` uses a single `AtomicU8` as a compact state machine, replacing the previous design that used three separate `AtomicBool` fields. All synchronization state is packed into four bitflags:
+
+| Flag           | Bit mask   | Meaning                                                    |
+| -------------- | ---------- | ---------------------------------------------------------- |
+| `LOCKED`       | `0b0000_0001` | The mutex is currently held by a thread.                |
+| `HAS_WAITERS`  | `0b0000_0010` | At least one thread is queued and waiting.              |
+| `QUEUE_LOCKED` | `0b0000_0100` | A thread is currently modifying the waiter queue.       |
+| `WOKEN`        | `0b0000_1000` | The front-of-queue waiter has been signaled to wake up. |
+
+The `lock()` path operates in three phases:
+
+1. **Fast path:** If no bits are set, atomically set `LOCKED` and return immediately.
+2. **Enqueue:** Acquire the `QUEUE_LOCKED` spinlock, push a `Waiter` onto the internal `VecDeque`, set `HAS_WAITERS`, then release `QUEUE_LOCKED`.
+3. **Wait loop:** Spin briefly (up to 100 iterations), then park the OS thread. On wake, attempt to claim the lock via `try_claim_lock`, which verifies the thread is at the front of the queue before popping it and setting `LOCKED`.
+
+On `drop` of `BasicMutexGuard`, the holder acquires `QUEUE_LOCKED`, peeks at the next waiter, atomically clears `LOCKED` (and sets `WOKEN` + `HAS_WAITERS` if a waiter exists), then unparks that thread.
+
 ## 📊 Performance
 
 `basic-mutex` is optimized for low overhead. In uncontended benchmarks (single-threaded lock/unlock cycles), it performs within ~20% of highly optimized system mutexes.
