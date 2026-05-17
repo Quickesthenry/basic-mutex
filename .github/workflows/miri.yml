@@ -1,0 +1,21 @@
+name: Miri
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  miri:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+      - name: Install nightly Rust + Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Setup Miri
+        run: cargo miri setup
+      - name: Run Tests with Miri
+        run: cargo miri test
