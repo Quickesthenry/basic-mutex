@@ -666,6 +666,7 @@ mod tests {
     #[test]
     fn test_comparative_performance() {
 
+        use parking_lot::Mutex as PlMutex;
         use std::sync::Mutex as StdMutex;
 
         let iterations = 100_000;
