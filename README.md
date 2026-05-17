@@ -1,133 +1,147 @@
-# basic_mutex [![CI](https://github.com/Quickesthenry/basic-mutex/actions/workflows/rust.yml/badge.svg)](https://github.com/Quickesthenry/basic-mutex/actions/workflows/rust.yml) [![Crates.io](https://img.shields.io/crates/v/basic-mutex.svg)](https://crates.io/crates/basic-mutex) [![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/Quickesthenry/basic-mutex?utm_source=oss&utm_medium=github&utm_campaign=Quickesthenry%2Fbasic-mutex&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)](https://coderabbit.ai)
+# basic-mutex
 
-A lightweight, fair, FIFO-ordered mutex for Rust.
+[![CI](https://github.com/Quickesthenry/basic-mutex/actions/workflows/rust.yml/badge.svg)](https://github.com/Quickesthenry/basic-mutex/actions/workflows/rust.yml)
+[![Crates.io](https://img.shields.io/crates/v/basic-mutex.svg)](https://crates.io/crates/basic-mutex)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-`basic_mutex` provides a minimal mutual exclusion primitive designed to guarantee predictable scheduling and starvation-free locking. Unlike many standard mutex implementations that may allow lock barging, this crate enforces strict First-In, First-Out (FIFO) ordering of waiting threads.
+A high-performance, **FIFO-ordered** mutex for Rust.
 
-## Features
+`basic-mutex` provides a **FIFO-ordered** synchronization primitive. Threads waiting on `lock()` acquire it in strict enqueue order — eliminating starvation *for queued waiters* under contention. Unlike standard mutexes which may allow "lock barging," `BasicMutex` ensures predictable scheduling without sacrificing significant performance.
 
-- FIFO fairness — threads acquire the lock in arrival order  
-- Hybrid locking strategy — spinning, exponential backoff, and OS parking  
-- Starvation-free design  
-- Lightweight and dependency-free  
-- RAII-based API for safe access to protected data  
+## 🚀 Key Features
 
-## Installation
+*   **FIFO Ordering Under Contention:** Threads waiting in `lock()` are served in strict FIFO order, eliminating starvation for queued waiters.
+*   **High Performance:** Competitive with `std::sync::Mutex` and `parking_lot` in uncontended scenarios (~38ns/lock).
+*   **Hybrid Waiting Strategy:** Uses efficient CPU spinning for short waits and OS-level parking for long waits.
+*   **Zero Dependencies:** Built entirely on `std::sync::atomic`. No external crates required.
+*   **Safe & Ergonomic:** RAII-based API (`BasicMutexGuard`) ensures locks are always released.
 
-Add this to your Cargo.toml:
+## 📦 Installation
 
-    [dependencies]
-    basic_mutex = "0.1"
+Add the crate to your project using cargo:
 
-## Usage
+    cargo add basic-mutex
 
-Basic example:
+## 🛠️ Usage
+
+### Basic Locking
 
     use basic_mutex::BasicMutex;
     use std::sync::Arc;
     use std::thread;
 
-    let mutex = Arc::new(BasicMutex::new(0));
-    let c_mutex = Arc::clone(&mutex);
+    let counter = Arc::new(BasicMutex::new(0));
+    let mut handles = vec![];
 
-    let handle = thread::spawn(move || {
-        let mut guard = c_mutex.lock();
-        *guard += 1;
-    });
+    for _ in 0..10 {
+        let counter_clone = Arc::clone(&counter);
+        let handle = thread::spawn(move || {
+            let mut guard = counter_clone.lock();
+            *guard += 1;
+        });
+        handles.push(handle);
+    }
 
-    handle.join().unwrap();
+    for handle in handles {
+        handle.join().unwrap();
+    }
 
-    assert_eq!(*mutex.lock(), 1);
+    assert_eq!(*counter.lock(), 10);
 
-Scoped locking:
+### Try Lock
 
     use basic_mutex::BasicMutex;
 
-    let mutex = BasicMutex::new(vec![1, 2, 3]);
+    let mutex = BasicMutex::new(42);
 
-    {
-        let mut guard = mutex.lock();
-        guard.push(4);
+    // Attempt to lock without blocking
+    if let Some(mut guard) = mutex.try_lock() {
+        *guard = 100;
+        println!("Value updated to: {}", *guard);
+    } else {
+        println!("Lock was already held.");
     }
 
-    assert_eq!(mutex.lock().len(), 4);
+## ⚖️ Fairness vs. Throughput
 
-## How it works
+Most standard mutexes (like `std::sync::Mutex` or `parking_lot::Mutex`) are **unfair**. This means a thread trying to lock might "barge" in ahead of threads that have been waiting longer. This maximizes throughput but can lead to **starvation** under high contention.
 
-`BasicMutex` uses a hybrid synchronization strategy:
+`basic-mutex` is **fair**. It maintains an internal queue of waiters. When the lock is released, it is handed off to the next thread in line.
 
-1. Fast path: attempts immediate lock acquisition  
-2. Spin phase: short busy-wait with exponential backoff  
-3. Queueing: threads are placed into a FIFO queue  
-4. Parking: threads sleep using the OS scheduler  
-5. Wake-up: the next thread is explicitly unparked on unlock  
+### When to use `basic-mutex`:
 
-This balances low latency under light contention with CPU efficiency under heavy contention, while preserving fairness.
+*   You need to guarantee that requests are processed in order (e.g., transaction processing).
+*   You want to prevent starvation *for queued waiters* under high contention.
+*   You prefer predictable latency over raw maximum throughput.
 
-## Trade-offs
+### When to use `std::sync::Mutex` or `parking_lot`:
 
-- Lower throughput than unfair mutexes in some workloads  
-- Additional overhead from maintaining a queue  
-- Not intended for lock-free or ultra-low-latency scenarios
-- The Lock including 3 other items aside from the main value  
+*   You need the absolute highest possible throughput under low contention.
+*   Lock ordering does not matter for your application logic.
 
-Use this crate when fairness and predictability are more important than raw throughput.
+## ⚙️ How It Works
 
-## Performance
+`BasicMutex` uses a single `AtomicU8` as a compact state machine, replacing the previous design that used three separate `AtomicBool` fields. All synchronization state is packed into four bitflags:
 
-`basic-mutex` is designed for **fairness**, not raw maximum throughput. It enforces strict FIFO ordering to prevent thread starvation, which introduces measurable overhead compared to unfair mutexes that allow "lock barging."
+| Flag           | Bit mask   | Meaning                                                    |
+| -------------- | ---------- | ---------------------------------------------------------- |
+| `LOCKED`       | `0b0000_0001` | The mutex is currently held by a thread.                |
+| `HAS_WAITERS`  | `0b0000_0010` | At least one thread is queued and waiting.              |
+| `QUEUE_LOCKED` | `0b0000_0100` | A thread is currently modifying the waiter queue.       |
+| `WOKEN`        | `0b0000_1000` | The front-of-queue waiter has been signaled to wake up. |
 
-### Benchmark Results (Illustrative)
-*Environment: 4 threads, high contention, Windows/Linux (results vary by hardware).*
+The `lock()` path operates in three phases:
 
-| Implementation | Avg. Time | Fairness Model |
-| :--- | :--- | :--- |
-| `parking_lot::Mutex` | ~163 µs | Unfair (Barging allowed) |
-| `std::sync::Mutex` | ~162 µs | Unfair (Barging allowed) |
-| **`basic-mutex`** | **~195 µs** | **Strict FIFO (Starvation-free)** |
+1. **Fast path:** If no bits are set, atomically set `LOCKED` and return immediately.
+2. **Enqueue:** Acquire the `QUEUE_LOCKED` spinlock, push a `Waiter` onto the internal `VecDeque`, set `HAS_WAITERS`, then release `QUEUE_LOCKED`.
+3. **Wait loop:** Spin briefly (up to 100 iterations), then park the OS thread. On wake, attempt to claim the lock via `try_claim_lock`, which verifies the thread is at the front of the queue before popping it and setting `LOCKED`.
 
-> **Note:** The ~20% difference observed here represents the cost of maintaining a fair queue and preventing overtaking. In low-contention scenarios, this gap narrows significantly. In high-contention scenarios, `basic-mutex` provides predictable latency at the expense of total throughput.
+On `drop` of `BasicMutexGuard`, the holder acquires `QUEUE_LOCKED`, peeks at the next waiter, atomically clears `LOCKED` (and sets `WOKEN` + `HAS_WAITERS` if a waiter exists), then unparks that thread.
 
-### Why choose `basic-mutex`?
-*   **Prevent Starvation:** In unfair mutexes, a "fast" thread can repeatedly steal the lock from waiting threads. `basic-mutex` guarantees that every thread gets its turn in order.
-*   **Predictable Latency:** Because threads are served in order, worst-case wait times are bounded and predictable, which is critical for real-time or responsive systems.
-*   **Hybrid Efficiency:** It uses exponential backoff spinning for short waits and OS-level parking for long waits, balancing CPU usage with responsiveness.
+## 📊 Performance
 
-Use `basic-mutex` when **correctness and fairness** are more important than squeezing out the last few nanoseconds of throughput.
+`basic-mutex` is optimized for low overhead. In uncontended benchmarks (single-threaded lock/unlock cycles), it performs within ~20% of highly optimized system mutexes.
 
-## Safety
+**Benchmark Provenance:**
+- Environment: Windows x86_64
+- Command: `cargo test test_comparative_performance -- --nocapture`
+- Parameters: 100,000 iterations per operation, single-threaded uncontended test
 
-- Uses `UnsafeCell` internally for interior mutability  
-- Safe access enforced via RAII (`BasicMutexGuard`)  
-- No poisoning: the mutex remains usable after a panic  
+| Implementation     | Lock (ns) | Try Lock (ns) | Fairness |
+| ------------------ | --------- | ------------- | -------- |
+| `std::sync::Mutex` | ~30.10    | ~34.35        | Unfair   |
+| `parking_lot`      | ~29.92    | ~38.01        | Unfair   |
+| `basic-mutex`      | ~38.10    | ~38.61        | **FIFO** |
 
-## Testing
+*(Benchmarks run on Windows x86_64, 100,000 iterations, uncontended)*
 
-The crate includes tests for:
+> **Note:** Under heavy contention, `basic-mutex` may show slightly lower throughput than unfair mutexes due to the overhead of maintaining the FIFO queue and context switching. However, it guarantees that no thread will wait indefinitely.
 
-- Basic functionality  
-- Mutual exclusion  
-- High contention scenarios  
-- Lost wakeup detection  
+## 🧪 Testing & Correctness
 
-Run tests with:
+This crate includes a rigorous test suite covering:
+*   **Mutual Exclusion:** Ensuring data races are impossible.
+*   **FIFO Ordering:** Verifying that FIFO-style behavior is observed under contention.
+*   **Lost Wakeup Torture:** Stress-testing the hybrid spin/park mechanism under extreme contention.
+*   **Reentrancy Checks:** Ensuring deadlocks are handled as expected.
+
+Run the tests with:
 
     cargo test
 
-## License
+Run the performance benchmark with:
 
-[Apache 2.0](https://www.apache.org/licenses/LICENSE-2.0)
+    cargo test test_comparative_performance -- --nocapture
 
-## Contributing
+## 🤝 Contributing
 
-Contributions and feedback are welcome. Open an issue or submit a pull request.
+Contributions are welcome! Areas of interest include:
+*   Further optimization of the atomic state machine.
+*   Additional stress tests for edge cases on different OS schedulers.
+*   Documentation improvements.
 
-## Notes
+Please open an issue or PR to discuss major changes.
 
-This crate is suitable for:
+## 📄 License
 
-- Learning and experimentation with synchronization primitives  
-- Workloads requiring strict fairness guarantees  
-- Exploring low-level concurrency patterns in Rust  
-
-It is not a drop-in replacement for `std::sync::Mutex` in all cases.
+Licensed under the [Apache License, Version 2.0](LICENSE).

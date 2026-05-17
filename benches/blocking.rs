@@ -1,9 +1,9 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use std::hint::black_box;
-use std::sync::{Arc, atomic::AtomicBool, Barrier};
-use std::sync::atomic::Ordering;
 use basic_mutex::BasicMutex;
-use parking_lot::Mutex as PlMutex; // Add this import
+use criterion::{Criterion, criterion_group, criterion_main};
+use parking_lot::Mutex as PlMutex;
+use std::hint::black_box;
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Barrier, atomic::AtomicBool};
 
 fn bench_parking_lot_mutex(c: &mut Criterion) {
     let mutex = Arc::new(PlMutex::new(0u64));
@@ -50,9 +50,10 @@ fn bench_parking_lot_mutex(c: &mut Criterion) {
     start_barrier.wait(); // Wake up the threads so they can check the stop flag
 
     // Join the threads
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 }
-
 
 fn bench_std_mutex(c: &mut Criterion) {
     let mutex = Arc::new(std::sync::Mutex::new(0u64));
@@ -99,9 +100,10 @@ fn bench_std_mutex(c: &mut Criterion) {
     start_barrier.wait(); // Wake up the threads so they can check the stop flag
 
     // Join the threads
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 }
-
 
 fn bench_basic_mutex(c: &mut Criterion) {
     let mutex = Arc::new(BasicMutex::new(0u64));
@@ -148,8 +150,15 @@ fn bench_basic_mutex(c: &mut Criterion) {
     start_barrier.wait(); // Wake up the threads so they can check the stop flag
 
     // Join the threads
-    for h in handles { h.join().unwrap(); }
+    for h in handles {
+        h.join().unwrap();
+    }
 }
 
-criterion_group!(benches, bench_std_mutex, bench_basic_mutex, bench_parking_lot_mutex);
+criterion_group!(
+    benches,
+    bench_std_mutex,
+    bench_basic_mutex,
+    bench_parking_lot_mutex
+);
 criterion_main!(benches);
