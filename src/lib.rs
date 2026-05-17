@@ -516,11 +516,156 @@ mod tests {
 
         assert_eq!(*mutex.lock(), 200);
     }
-    /// Test 8: Comparative Performance Check (Uncontended)
+
+    /// Test 8: Contended try_lock Under Concurrent Lock Holders
+    ///
+    /// Spawns threads that each hold the lock briefly while other threads
+    /// hammer try_lock. Verifies that try_lock never produces a data race:
+    /// every successful try_lock acquisition must see a consistent counter,
+    /// and the final count must equal the total number of successful increments.
+    #[test]
+    fn test_contended_try_lock() {
+        let mutex = Arc::new(BasicMutex::new(0u64));
+        let successful_tries = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut handles = vec![];
+
+        // 4 threads that hold the lock briefly (creating contention)
+        for _ in 0..4 {
+            let m = Arc::clone(&mutex);
+            handles.push(thread::spawn(move || {
+                for _ in 0..50 {
+                    let mut guard = m.lock();
+                    *guard += 1;
+                    // Hold briefly to create contention window
+                    black_box(*guard);
+                }
+            }));
+        }
+
+        // 4 threads that only use try_lock, counting their successes
+        for _ in 0..4 {
+            let m = Arc::clone(&mutex);
+            let tries = Arc::clone(&successful_tries);
+            handles.push(thread::spawn(move || {
+                let mut local_count = 0u64;
+                for _ in 0..200 {
+                    if let Some(mut guard) = m.try_lock() {
+                        *guard += 1;
+                        local_count += 1;
+                        black_box(*guard);
+                    } else {
+                        thread::yield_now();
+                    }
+                }
+                tries.fetch_add(local_count, std::sync::atomic::Ordering::Relaxed);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // The final value must equal lock() increments + try_lock() increments exactly
+        let lock_increments = 4 * 50u64;
+        let try_increments = successful_tries.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(*mutex.lock(), lock_increments + try_increments);
+    }
+
+    /// Test 9: Mixed Contended lock() and try_lock()
+    ///
+    /// Half the threads use lock() (blocking), half use try_lock() (non-blocking).
+    /// Asserts data integrity: no increment is lost or double-counted.
+    #[test]
+    fn test_mixed_contended_lock_and_try_lock() {
+        let mutex = Arc::new(BasicMutex::new(0u64));
+        let try_lock_successes = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let mut handles = vec![];
+        const LOCK_THREADS: u64 = 4;
+        const LOCK_ITERS: u64 = 75;
+
+        // Blocking lock() threads
+        for _ in 0..LOCK_THREADS {
+            let m = Arc::clone(&mutex);
+            handles.push(thread::spawn(move || {
+                for _ in 0..LOCK_ITERS {
+                    let mut guard = m.lock();
+                    *guard += 1;
+                    black_box(*guard);
+                }
+            }));
+        }
+
+        // Non-blocking try_lock() threads
+        for _ in 0..4 {
+            let m = Arc::clone(&mutex);
+            let successes = Arc::clone(&try_lock_successes);
+            handles.push(thread::spawn(move || {
+                let mut local = 0u64;
+                for _ in 0..300 {
+                    if let Some(mut guard) = m.try_lock() {
+                        *guard += 1;
+                        local += 1;
+                        black_box(*guard);
+                    } else {
+                        thread::yield_now();
+                    }
+                }
+                successes.fetch_add(local, std::sync::atomic::Ordering::Relaxed);
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let expected = LOCK_THREADS * LOCK_ITERS
+            + try_lock_successes.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(*mutex.lock(), expected);
+    }
+
+    /// Test 10: try_lock Returns None When Waiters Are Queued
+    ///
+    /// Verifies the fairness guarantee: once at least one thread is blocked
+    /// in lock(), try_lock() from a third thread must return None (no barging).
+    #[test]
+    fn test_contended_try_lock_blocked_by_waiters() {
+        let mutex = Arc::new(BasicMutex::new(0u64));
+
+        // Acquire the lock on the main thread
+        let guard = mutex.lock();
+
+        // Spawn a thread that will block on lock(), enqueuing itself as a waiter
+        let m = Arc::clone(&mutex);
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let waiter_handle = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let mut g = m.lock();
+            *g += 1;
+        });
+
+        // Wait until the waiter thread has signaled it is about to call lock()
+        ready_rx.recv().unwrap();
+        // Give the waiter thread time to actually enqueue in the wait queue
+        thread::sleep(Duration::from_millis(5));
+
+        // try_lock must return None: HAS_WAITERS is set so barging is forbidden
+        assert!(
+            mutex.try_lock().is_none(),
+            "try_lock must not barge ahead of a queued waiter"
+        );
+
+        // Release the main lock so the waiter can proceed and the test can finish
+        drop(guard);
+        waiter_handle.join().unwrap();
+
+        assert_eq!(*mutex.lock(), 1);
+    }
+
+    /// Test 11: Comparative Performance Check (Uncontended)
     /// Compares BasicMutex against std::sync::Mutex and parking_lot::Mutex.
     #[test]
     fn test_comparative_performance() {
-        use parking_lot::Mutex as PlMutex;
+
         use std::sync::Mutex as StdMutex;
 
         let iterations = 100_000;
