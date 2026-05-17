@@ -388,56 +388,56 @@ mod tests {
     }
 
     /// Test 3: FIFO Fairness Check
-    /// Threads register their index in `enqueue_order` before calling lock(),
-    /// then signal via channel. This ensures `enqueue_order` reflects actual
-    /// queue registration order rather than scheduler/signal timing.
+    ///
+    /// Grants each thread permission to call lock() one at a time (with a small
+    /// delay between each grant) while the main thread holds the lock. This ensures
+    /// threads enqueue in a known order (0, 1, 2, 3), after which the main lock is
+    /// released and we verify acquisition order matches.
     #[test]
     fn test_fifo_ordering() {
         let mutex = Arc::new(BasicMutex::new(0));
         let acquire_order = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let enqueue_order = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut handles = vec![];
 
-        // Hold the lock initially so threads queue up
-        let _main_guard = mutex.lock();
+        // Hold the lock so spawned threads block immediately when they call lock()
+        let main_guard = mutex.lock();
 
-        // Use a channel to know when threads have registered and are about to block
-        let (tx, rx) = std::sync::mpsc::channel();
-
+        // Per-thread "start" channels: the main thread sends permission one at a time
+        let mut start_txs = Vec::new();
         for i in 0..4 {
+            let (start_tx, start_rx) = std::sync::mpsc::channel::<()>();
+            start_txs.push(start_tx);
+
             let m = Arc::clone(&mutex);
-            let eq = Arc::clone(&enqueue_order);
             let ao = Arc::clone(&acquire_order);
-            let tx = tx.clone();
             handles.push(thread::spawn(move || {
-                // Register in enqueue_order first, then signal, then block.
-                // This ensures the channel signal happens after the thread has
-                // recorded its position, so enqueue_order tracks registration order.
-                eq.lock().unwrap().push(i);
-                tx.send(()).unwrap();
+                // Wait for explicit permission before calling lock().
+                // This lets the main thread control the enqueue order.
+                start_rx.recv().unwrap();
                 let _guard = m.lock();
                 ao.lock().unwrap().push(i);
             }));
         }
 
-        // Wait for all 4 threads to register and signal
-        for _ in 0..4 {
-            rx.recv().unwrap();
+        // Grant permissions one at a time with a sleep between each.
+        // Since the main guard is still held, each thread that receives permission
+        // immediately blocks inside lock() and enters the wait queue before the
+        // next thread is permitted to call lock().
+        for tx in start_txs {
+            tx.send(()).unwrap();
+            thread::sleep(Duration::from_millis(5));
         }
 
-        // Small sleep to ensure all threads are blocked on lock()
-        thread::sleep(Duration::from_millis(5));
-
-        // Release main lock to let them proceed in FIFO order
-        drop(_main_guard);
+        // All 4 threads are now queued in order 0, 1, 2, 3.
+        // Release the main lock so they proceed in FIFO order.
+        drop(main_guard);
 
         for h in handles {
             h.join().unwrap();
         }
 
-        let final_enqueue = enqueue_order.lock().unwrap().clone();
         let final_acquire = acquire_order.lock().unwrap().clone();
-        assert_eq!(final_acquire, final_enqueue);
+        assert_eq!(final_acquire, vec![0, 1, 2, 3]);
     }
 
     /// Test 4: Try Lock Failure
