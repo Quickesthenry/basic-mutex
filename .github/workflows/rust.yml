@@ -1,24 +1,209 @@
-name: Rust
+name: Rust CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
+  schedule:
+    - cron: "0 2 * * *" # Nightly at 02:00 UTC
 
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: read
+  discussions: write
+  issues: write
+  pull-requests: write
+
 jobs:
-  build:
-
+  fmt:
+    name: Formatting
     runs-on: ubuntu-latest
-
     steps:
-    - uses: actions/checkout@v4
-    - name: Check
-      run: cargo check --verbose
-    - name: Run tests
-      run: cargo test --verbose
-    - name: Run Clippy
-      run: cargo clippy --verbose
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: "Tests (${{ matrix.toolchain }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@${{ matrix.toolchain }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.toolchain }}
+      - name: Run tests
+        run: cargo test --verbose
+
+  nightly:
+    name: Nightly build
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly
+      - name: Check (nightly)
+        run: cargo check --verbose
+      - name: Test (nightly)
+        run: cargo test --verbose
+
+  docs:
+    name: Documentation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: docs
+      - name: Check documentation (warnings as errors)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --document-private-items
+
+  benchmark:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    needs: [fmt, clippy, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bench
+      - name: Run Criterion benchmarks
+        run: cargo bench 2>&1 | tee bench_output.txt
+      - name: Run uncontended performance comparison
+        run: cargo test test_comparative_performance -- --nocapture 2>&1 | tee perf_output.txt
+      - name: Upload benchmark artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results-${{ github.run_id }}
+          path: |
+            bench_output.txt
+            perf_output.txt
+            target/criterion/
+      - name: Post benchmark results to GitHub Discussions (with fallback)
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const bench = fs.existsSync('bench_output.txt')
+              ? fs.readFileSync('bench_output.txt', 'utf8').slice(0, 4000)
+              : '(no output)';
+            const perf = fs.existsSync('perf_output.txt')
+              ? fs.readFileSync('perf_output.txt', 'utf8').slice(0, 2000)
+              : '(no output)';
+
+            const runType = context.eventName === 'schedule' ? '🌙 Nightly' : '🔀 Push to main';
+            const date = new Date().toISOString().split('T')[0];
+            const title = `${runType} Benchmark Results — ${date}`;
+            const body = [
+              `## ${title}`,
+              '',
+              `- Trigger: ${runType}`,
+              `- Commit: ${context.sha}`,
+              `- Run: https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              '',
+              '### Criterion Benchmarks',
+              '<details><summary>Expand output</summary>',
+              '',
+              '```',
+              bench,
+              '```',
+              '',
+              '</details>',
+              '',
+              '### Uncontended Performance Comparison',
+              '```',
+              perf,
+              '```',
+            ].join('\n');
+
+            async function postDiscussion() {
+              const repo = await github.graphql(`
+                query($owner:String!, $name:String!) {
+                  repository(owner:$owner, name:$name) {
+                    id
+                    hasDiscussionsEnabled
+                    discussionCategories(first: 20) {
+                      nodes { id slug name }
+                    }
+                  }
+                }`,
+                { owner: context.repo.owner, name: context.repo.repo }
+              );
+
+              const r = repo.repository;
+              if (!r.hasDiscussionsEnabled) return null;
+
+              const preferred = ['show-and-tell', 'announcements', 'general'];
+              let cat = null;
+              for (const want of preferred) {
+                cat = r.discussionCategories.nodes.find(c => (c.slug || '').toLowerCase() === want);
+                if (cat) break;
+              }
+              if (!cat) cat = r.discussionCategories.nodes[0];
+              if (!cat) return null;
+
+              const res = await github.graphql(`
+                mutation($repoId:ID!, $categoryId:ID!, $title:String!, $body:String!) {
+                  createDiscussion(input:{
+                    repositoryId:$repoId, categoryId:$categoryId, title:$title, body:$body
+                  }) { discussion { url } }
+                }`,
+                { repoId: r.id, categoryId: cat.id, title, body }
+              );
+              return res.createDiscussion.discussion.url;
+            }
+
+            async function postIssue() {
+              const { data } = await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: `Benchmark Results — ${date}`,
+                body
+              });
+              return data.html_url;
+            }
+
+            try {
+              const url = await postDiscussion();
+              if (url) {
+                core.info(`Posted Discussion: ${url}`);
+                return;
+              }
+              const issueUrl = await postIssue();
+              core.info(`Posted Issue (fallback): ${issueUrl}`);
+            } catch (e) {
+              core.warning(`Failed to post Discussion; falling back to Issue. Error: ${e.message}`);
+              const issueUrl = await postIssue();
+              core.info(`Posted Issue (fallback): ${issueUrl}`);
+            }
