@@ -69,11 +69,13 @@ Most standard mutexes (like `std::sync::Mutex` or `parking_lot::Mutex`) are **un
 `basic-mutex` is **fair**. It maintains an internal queue of waiters. When the lock is released, it is handed off to the next thread in line.
 
 ### When to use `basic-mutex`:
+
 *   You need to guarantee that requests are processed in order (e.g., transaction processing).
 *   You want to prevent starvation *for queued waiters* under high contention.
 *   You prefer predictable latency over raw maximum throughput.
 
 ### When to use `std::sync::Mutex` or `parking_lot`:
+
 *   You need the absolute highest possible throughput under low contention.
 *   Lock ordering does not matter for your application logic.
 

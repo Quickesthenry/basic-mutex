@@ -441,7 +441,7 @@ mod tests {
     }
 
     /// Test 4: Try Lock Failure
-
+    #[test]
     fn test_try_lock_failure() {
         let mutex = BasicMutex::new(42);
         let _guard = mutex.lock();
@@ -658,14 +658,15 @@ mod tests {
         // Give the waiter thread time to actually enqueue in the wait queue
         thread::sleep(Duration::from_millis(5));
 
-        // try_lock must return None: HAS_WAITERS is set so barging is forbidden
+        // Release the main lock; the unlock sets HAS_WAITERS | WOKEN (not LOCKED),
+        // so the immediately following try_lock races in the handoff window and must
+        // return None because HAS_WAITERS forbids barging.
+        drop(guard);
         assert!(
             mutex.try_lock().is_none(),
             "try_lock must not barge ahead of a queued waiter"
         );
 
-        // Release the main lock so the waiter can proceed and the test can finish
-        drop(guard);
         waiter_handle.join().unwrap();
 
         assert_eq!(*mutex.lock(), 1);
