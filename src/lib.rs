@@ -81,17 +81,21 @@ impl<'a, T: Send> Drop for BasicMutexGuard<'a, T> {
         };
         let has_waiters = next_thread.is_some();
 
-        // 3. Update state: Clear LOCKED & QUEUE_LOCKED. Set WOKEN if waiters exist.
+        // 3. Update state while HOLDING queue lock
         let mut new_state = 0u8;
         if has_waiters {
             new_state |= HAS_WAITERS | WOKEN;
         }
         self.mutex.state.store(new_state, Ordering::Release);
 
-        // 4. Unpark next waiter
+        // 4. Unpark next waiter WHILE STILL HOLDING queue lock
+        // This prevents race where another thread tries to claim during handoff
         if let Some(thread) = next_thread {
             thread.unpark();
         }
+
+        // 5. Only release queue lock AFTER unpark completes
+        self.mutex.state.fetch_and(!QUEUE_LOCKED, Ordering::Release);
     }
 }
 
@@ -264,14 +268,27 @@ impl<T: Send> BasicMutex<T> {
         }
     }
 
-    /// Helper: Attempts to claim lock if we are at the front of the queue.
+/// Helper: Attempts to claim lock if we are at the front of the queue.
     fn try_claim_lock(&self, current_thread_id: ThreadId) -> bool {
         self.acquire_queue_spinlock(0);
 
-        let is_front = unsafe {
-            (&*self.threads.get())
+        // All queue operations in one unsafe block to avoid stacked borrows issues
+        let (is_front, has_waiters) = unsafe {
+            let queue = &mut *self.threads.get();
+            
+            // Check if we're at front
+            let is_front = queue
                 .front()
-                .is_some_and(|w| w.thread_id == current_thread_id)
+                .is_some_and(|w| w.thread_id == current_thread_id);
+            
+            if !is_front {
+                (false, false)
+            } else {
+                // Pop and claim - we were at front
+                queue.pop_front();
+                let has_waiters = !queue.is_empty();
+                (true, has_waiters)
+            }
         };
 
         if !is_front {
@@ -279,13 +296,14 @@ impl<T: Send> BasicMutex<T> {
             return false;
         }
 
-        // Pop and claim
-        let has_waiters = unsafe {
-            let queue = &mut *self.threads.get();
-            queue.pop_front();
-            !queue.is_empty()
-        };
+        // Verify we were actually woken (WOKEN should be set)
+        let state = self.state.load(Ordering::Acquire);
+        if state & WOKEN == 0 {
+            self.state.fetch_and(!QUEUE_LOCKED, Ordering::Release);
+            return false;
+        }
 
+        // Clear WOKEN when claiming - we're the new lock holder
         let mut new_state = LOCKED;
         if has_waiters {
             new_state |= HAS_WAITERS;
@@ -463,5 +481,33 @@ mod tests {
         let lock_increments = 4 * 50u64;
         let try_increments = successful_tries.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(*mutex.lock(), lock_increments + try_increments);
+    }
+
+    #[test]
+    fn test_lost_wakeup_torture() {
+        let mutex = Arc::new(BasicMutex::new(0));
+        let mut handles = vec![];
+
+        for i in 0..4 {
+            let m = Arc::clone(&mutex);
+            handles.push(thread::spawn(move || {
+                for _ in 0..50 {
+                    let mut guard = m.lock();
+                    *guard += 1;
+
+                    if i % 2 == 0 {
+                        thread::sleep(std::time::Duration::from_micros(10));
+                    }
+                    drop(guard);
+                    thread::yield_now();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(*mutex.lock(), 200);
     }
 }
