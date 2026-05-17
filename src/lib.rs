@@ -326,7 +326,7 @@ impl<T: Send> BasicMutex<T> {
 
         // Check if front
         let is_front = unsafe {
-            queue
+            (&*self.threads.get())
                 .front()
                 .map_or(false, |w| w.thread_id == current_thread_id)
         };
