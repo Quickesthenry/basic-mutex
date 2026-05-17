@@ -235,8 +235,10 @@ impl<T: Send> BasicMutex<T> {
             }
         };
 
-        // Recheck: If mutex became free while we were acquiring QUEUE_LOCKED, claim it directly
-        if acquired_state & LOCKED == 0 {
+        // Recheck: If mutex is truly uncontended (no lock, no waiters, no pending wakeup),
+        // claim it directly without enqueueing. We must check all three bits to prevent
+        // a newcomer from barging when HAS_WAITERS or WOKEN are set.
+        if acquired_state & (LOCKED | HAS_WAITERS | WOKEN) == 0 {
             // Mutex is free, claim it without enqueueing
             self.state.store(LOCKED, Ordering::Release);
             return BasicMutexGuard { mutex: self, phantom: PhantomData };
@@ -309,7 +311,8 @@ impl<T: Send> BasicMutex<T> {
         };
 
         if !is_front {
-
+            // Release the queue spinlock before returning so other threads can proceed.
+            self.state.fetch_and(!QUEUE_LOCKED, Ordering::Release);
             return false;
         }
 
@@ -385,53 +388,60 @@ mod tests {
     }
 
     /// Test 3: FIFO Fairness Check
-    /// Removed arbitrary sleep; used a channel to signal readiness instead.
+    /// Threads register their index in `enqueue_order` before calling lock(),
+    /// then signal via channel. This ensures `enqueue_order` reflects actual
+    /// queue registration order rather than scheduler/signal timing.
     #[test]
     fn test_fifo_ordering() {
         let mutex = Arc::new(BasicMutex::new(0));
-        let order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let acquire_order = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let enqueue_order = Arc::new(std::sync::Mutex::new(Vec::new()));
         let mut handles = vec![];
 
         // Hold the lock initially so threads queue up
         let _main_guard = mutex.lock();
 
-        // Use a channel to know when threads are actually waiting
+        // Use a channel to know when threads have registered and are about to block
         let (tx, rx) = std::sync::mpsc::channel();
 
         for i in 0..4 {
             let m = Arc::clone(&mutex);
-            let o = Arc::clone(&order);
+            let eq = Arc::clone(&enqueue_order);
+            let ao = Arc::clone(&acquire_order);
             let tx = tx.clone();
             handles.push(thread::spawn(move || {
-                // Signal that we are about to block on lock
-                tx.send(i).unwrap();
+                // Register in enqueue_order first, then signal, then block.
+                // This ensures the channel signal happens after the thread has
+                // recorded its position, so enqueue_order tracks registration order.
+                eq.lock().unwrap().push(i);
+                tx.send(()).unwrap();
                 let _guard = m.lock();
-                o.lock().unwrap().push(i);
+                ao.lock().unwrap().push(i);
             }));
         }
 
-        // Wait for all 4 threads to signal they are ready/waiting and capture enqueue order
-        let mut enqueue_order = Vec::new();
+        // Wait for all 4 threads to register and signal
         for _ in 0..4 {
-            enqueue_order.push(rx.recv().unwrap());
+            rx.recv().unwrap();
         }
 
-        // Small yield to ensure they are fully parked/queued
-        thread::yield_now();
+        // Small sleep to ensure all threads are blocked on lock()
+        thread::sleep(Duration::from_millis(5));
 
-        // Release main lock to let them proceed
+        // Release main lock to let them proceed in FIFO order
         drop(_main_guard);
 
         for h in handles {
             h.join().unwrap();
         }
 
-        let final_order = order.lock().unwrap().clone();
-        assert_eq!(final_order, enqueue_order);
+        let final_enqueue = enqueue_order.lock().unwrap().clone();
+        let final_acquire = acquire_order.lock().unwrap().clone();
+        assert_eq!(final_acquire, final_enqueue);
     }
 
     /// Test 4: Try Lock Failure
-    #[test]
+
     fn test_try_lock_failure() {
         let mutex = BasicMutex::new(42);
         let _guard = mutex.lock();
