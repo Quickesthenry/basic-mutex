@@ -48,7 +48,7 @@ use std::{
     marker::PhantomData,
     ops::{Deref, DerefMut},
     sync::atomic::{AtomicU8, Ordering},
-    thread::Thread,
+    thread::{Thread, ThreadId},
 };
 
 // Internal bitflags for the atomic state
@@ -60,6 +60,7 @@ const WOKEN: u8 = 0b0000_1000;
 /// Internal representation of a thread waiting for the lock.
 struct Waiter {
     thread: Thread,
+    thread_id: ThreadId,
 }
 
 /// A mutual exclusion primitive useful for protecting shared data.
@@ -214,6 +215,7 @@ impl<T: Send> BasicMutex<T> {
         }
         // --- PHASE 2: Enqueue ---
         let current_thread = std::thread::current();
+        let current_thread_id = current_thread.id();
 
         // Acquire queue spinlock to push waiter
         let acquired_state = loop {
@@ -245,6 +247,7 @@ impl<T: Send> BasicMutex<T> {
             let queue = &mut *self.threads.get();
             queue.push_back(Waiter {
                 thread: current_thread.clone(),
+                thread_id: current_thread_id,
             });
         }
 
@@ -258,7 +261,7 @@ impl<T: Send> BasicMutex<T> {
 
             // If WOKEN is set, try to claim the lock
             if state & WOKEN != 0 {
-                if self.try_claim_lock(&current_thread) {
+                if self.try_claim_lock(current_thread_id) {
                     return BasicMutexGuard { mutex: self, phantom: PhantomData };
                 }
             }
@@ -278,7 +281,7 @@ impl<T: Send> BasicMutex<T> {
     }
 
     /// Helper: Attempts to claim lock if we are at the front of the queue.
-    fn try_claim_lock(&self, current_thread: &Thread) -> bool {
+    fn try_claim_lock(&self, current_thread_id: ThreadId) -> bool {
         // Acquire queue spinlock
         loop {
             let s = self.state.load(Ordering::Acquire);
@@ -302,11 +305,11 @@ impl<T: Send> BasicMutex<T> {
             let queue = &*self.threads.get();
             queue
                 .front()
-                .map_or(false, |w| w.thread.id() == current_thread.id())
+                .map_or(false, |w| w.thread_id == current_thread_id)
         };
 
         if !is_front {
-            self.state.fetch_and(!QUEUE_LOCKED, Ordering::Release);
+
             return false;
         }
 
